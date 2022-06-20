@@ -1,0 +1,210 @@
+<?php
+
+/**
+ * @file
+ * A module calculate distance between two points.
+ */
+
+/**
+ * Implements hook_node_presave().
+ */
+function custom_node_presave($node) {
+  if ($node->type === 'CT1') {
+    $distance = $node->field_autobahn["und"]['0']["value"];
+    if (empty($distance)) {
+      $lat_node = $node->field_koordinaten_ge["und"][0]["lat"];
+      $lon_node = $node->field_koordinaten_ge["und"][0]["lon"];
+      $distance = custom_calc($lat_node, $lon_node);
+      $node->field_autobahn["und"][0]["value"] = $distance[0];
+      $node->field_name_der_anschlussstelle["und"][0]["value"] = $distance[1];
+      $node->field_name_der_autobahn["und"] = $distance[2];
+    }
+  }
+}
+
+/**
+ * Calculation of distance in a straight line.
+ *
+ * @param $latitude_from
+ * @param $longitude_from
+ * @param $latitude_to
+ * @param $longitude_to
+ *
+ * @return string
+ */
+function get_distance($latitude_from, $longitude_from, $latitude_to, $longitude_to) {
+  // Calculate distance between latitude and longitude.
+  $theta = $longitude_from - $longitude_to;
+  $dist = sin(deg2rad($latitude_from)) * sin(deg2rad($latitude_to)) + cos(deg2rad($latitude_from)) * cos(deg2rad($latitude_to)) * cos(deg2rad($theta));
+  $dist = acos($dist);
+  $dist = rad2deg($dist);
+  // Return distance from > to in km.
+  return strtoupper(round(($dist * 60 * 1.1515) * 1.609344, 2));
+}
+
+/**
+ * Сalculates the distance along the route using router.project-osrm.org.
+ *
+ * @param $url
+ *
+ * @return float
+ */
+function get_distance_to_road($url) {
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, $url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  $response = curl_exec($ch);
+  $data = json_decode($response, TRUE);
+  $distance = $data["routes"][0]["distance"];
+  $km = round(($distance / 1000), 2);
+  return $km;
+}
+
+/**
+ * @param $array
+ * @param $cols
+ *
+ * @return array
+ */
+function array_msort($array, $cols) {
+  $colarr = [];
+  foreach ($cols as $col => $order) {
+    $colarr[$col] = [];
+    foreach ($array as $k => $row) {
+      $colarr[$col]['_' . $k] = strtolower($row[$col]);
+    }
+  }
+  $eval = 'array_multisort(';
+  foreach ($cols as $col => $order) {
+    $eval .= '$colarr[\'' . $col . '\'],' . $order . ',';
+  }
+  $eval = substr($eval, 0, -1) . ');';
+  eval($eval);
+  $ret = [];
+  foreach ($colarr as $col => $arr) {
+    foreach ($arr as $k => $v) {
+      $k = substr($k, 1);
+      if (!isset($ret[$k])) {
+        $ret[$k] = $array[$k];
+      }
+      $ret[$k][$col] = $array[$k][$col];
+    }
+  }
+  return $ret;
+}
+
+/**
+ * @param $lat_node
+ *   Latitude from node.
+ *
+ * @param $lon_node
+ *   Longitude from node.
+ *
+ * @return mixed
+ */
+function custom_calc($lat_node, $lon_node) {
+  $path = dirname(__FILE__);
+  // Сonnecting a file with autobahns.
+  $data = json_decode(file_get_contents(
+    $path.'/file1.geojson'), TRUE);
+  $array = [];
+  // Iterator for 1-st array.
+  $i = 0;
+  foreach ($data as $value) {
+    $km = get_distance($lat_node, $lon_node, $value['lat'], $value['lon']);
+    $i++;
+    $array[$i] = $value;
+    $array[$i]['km'] = $km;
+  }
+  $arr2 = array_msort($array, ['km' => SORT_ASC]);
+  $array_filtered = array_slice($arr2, 0, 10);
+
+  $array_with_distance = [];
+  // Iterator for 2-st array.
+  $ii = 0;
+  foreach ($array_filtered as $value_new) {
+    $ii++;
+    $url = "http://router.project-osrm.org/route/v1/driving/";
+    $main_url = $url . $lon_node . ',' . $lat_node . ';' . $value_new['lon'] . ',' . $value_new['lat'];
+    $main_distance = get_distance_to_road($main_url);
+    $array_with_distance[$ii] = $value_new;
+    $array_with_distance[$ii]['distance'] = $main_distance;
+  }
+  $arr3 = array_msort($array_with_distance, ['distance' => SORT_ASC]);
+
+  $arraysorter = [];
+  foreach ($arr3 as $value) {
+    if ($value['distance']-$value['km'] <= 2.5) {
+      $arraysorter[] = $value;
+    }
+  }
+  if ($arraysorter == NULL) {
+    $newautoarr = $arr3;
+  }
+  else {
+    $newautoarr = $arraysorter;
+  }
+
+  $data_first_ban = json_decode(file_get_contents(
+    $path.'/file2.geojson'), TRUE);
+  foreach ($data_first_ban['features'] as $value) {
+    foreach ($newautoarr as $item) {
+      $autobahn_name = $item["NK_Name"];
+      if ($value['properties']['NK_BABKnoten'] == 'J' &&
+        $autobahn_name == $value['properties']['NK_Name'] &&
+        $value['properties']['NK_Knotenpunktfunktion'] == 'Anschlussstelle') {
+        $newautoarr2[] = $item;
+      }
+    }
+  }
+
+  $first_element = reset($newautoarr2);
+  $autobahn_name = $first_element["NK_Name"];
+  $final_distance = $first_element["distance"];
+  $radius = 10;
+
+  foreach ($newautoarr2 as $value){
+    $km = get_distance($first_element['lat'], $first_element['lon'], $value['lat'], $value['lon']);
+    if ($km < $radius && $km >= 0) {
+      $arr4[] = $value;
+    }
+  }
+
+  $data_new = json_decode(file_get_contents(
+    $path.'/file2.geojson'), TRUE);
+  foreach ($data_new['features'] as $value) {
+    if ($value['properties']['NK_BABKnoten'] == 'J'){
+      foreach ($arr4 as $item) {
+        if ($item['NK_Name'] == $value['properties']['NK_Name']) {
+          $coordinates[] = $value['geometry']['coordinates'];
+        }
+      }
+    }
+  }
+
+  $file = file($path.'/file3.geojson');
+  foreach ($file as $value) {
+    if (strpos($value, 'Str_Klasse_kurz": "A"')) {
+      foreach ($coordinates as $item) {
+        $coordinates1 = mb_substr("[ " . $item[0], 0, -1);
+        $coordinates2 = mb_substr(", " . $item[1], 0, -1);
+
+        $coords = strpos($value, $coordinates1) !== false && strpos($value, $coordinates2) !== false;
+        if ($coords) {
+          $text1 = stristr($value, '"Str_Kennung": "');
+          $text2 = stristr($text1, '", "Str_Klasse_kurz":', true);
+          $text3 = mb_substr($text2, 16);
+          $new_autobahns_name[] = $text3;
+        }
+      }
+    }
+  }
+
+  $ten_autobahns = array_unique($new_autobahns_name);
+  foreach ($ten_autobahns as $value){
+    $new_ten_autobahn_name[] = ["value" => $value];
+  }
+  $autobahns_name = $new_ten_autobahn_name;
+
+  return [$final_distance, $autobahn_name, $autobahns_name];
+}
