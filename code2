@@ -1,0 +1,32 @@
+<?php
+
+function custom_views_pre_build(ViewExecutable $view) {
+    $route_name = \Drupal::routeMatch()->getRouteName();
+    if ($view->id() == 'contact_country_select' && $route_name != "views.ajax") {
+        // Get client IP.
+        $ip = getenv('HTTP_CLIENT_IP') ?:
+            getenv('HTTP_X_FORWARDED_FOR') ?:
+                getenv('HTTP_X_FORWARDED') ?:
+                    getenv('HTTP_FORWARDED_FOR') ?:
+                        getenv('HTTP_FORWARDED') ?:
+                            getenv('REMOTE_ADDR');
+        // Get client Country
+        $res = json_decode(file_get_contents("https://www.iplocate.io/api/lookup/{$ip}"));
+        $country_name = $res->country;
+        if ($country_name != NULL) {
+            $term = \Drupal::entityTypeManager()
+                ->getStorage('taxonomy_term')
+                ->loadByProperties(['name' => $country_name]);
+            if ($term != NULL) {
+                $filters = strval(key($term));
+                $view->setExposedInput(['country' => $filters]);
+            }
+            else {
+                $view->setExposedInput(['country' => '39']);
+            }
+        }
+        else {
+            $view->setExposedInput(['country' => '39']);
+        }
+    }
+}
